@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BE Overlay</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:      rgba(15, 15, 19, 0.88);
+      --border:  rgba(255,255,255,0.08);
+      --accent:  #7c6af7;
+      --success: #4ade80;
+      --danger:  #f87171;
+      --warning: #facc15;
+      --text:    #e8e8f0;
+      --muted:   #8888aa;
+      --radius:  12px;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      background: transparent;
+      overflow: hidden;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      user-select: none;
+    }
+
+    /* ── MAIN CONTAINER ── */
+    #overlay {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #card {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 14px;
+      min-width: 180px;
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+      transition: border-color 0.3s, box-shadow 0.3s;
+    }
+
+    #card.state-running { border-color: rgba(124,106,247,0.5); box-shadow: 0 0 20px rgba(124,106,247,0.15), 0 8px 32px rgba(0,0,0,0.4); }
+    #card.state-break   { border-color: rgba(250,204,21,0.4);  box-shadow: 0 0 20px rgba(250,204,21,0.1),  0 8px 32px rgba(0,0,0,0.4); }
+    #card.state-idle    { border-color: var(--border); }
+
+    /* ── DRAG HANDLE ── */
+    #drag-handle {
+      -webkit-app-region: drag;
+      height: 6px;
+      width: 40px;
+      background: var(--border);
+      border-radius: 99px;
+      margin: 0 auto 10px;
+      cursor: grab;
+    }
+
+    /* ── TASK NAME ── */
+    #task-name {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 4px;
+      text-align: center;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 160px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+
+    /* ── STATE LABEL ── */
+    #state-label {
+      font-size: 10px;
+      text-align: center;
+      margin-bottom: 8px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+    }
+    .label-run   { color: var(--accent); }
+    .label-break { color: var(--warning); }
+    .label-idle  { color: var(--muted); }
+
+    /* ── TIMER ── */
+    #timer {
+      font-size: 36px;
+      font-weight: 800;
+      text-align: center;
+      letter-spacing: 0.04em;
+      font-variant-numeric: tabular-nums;
+      line-height: 1;
+      margin-bottom: 8px;
+      transition: color 0.3s;
+    }
+    .timer-run   { color: var(--accent); }
+    .timer-break { color: var(--warning); }
+    .timer-idle  { color: var(--muted); }
+
+    /* ── SEGMENT BAR ── */
+    #seg-bar {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 10px;
+      justify-content: center;
+    }
+    .seg {
+      height: 3px;
+      flex: 1;
+      max-width: 28px;
+      border-radius: 99px;
+      background: rgba(255,255,255,0.1);
+      transition: background 0.3s;
+    }
+    .seg-done   { background: var(--success); }
+    .seg-active { background: var(--accent); animation: segPulse 1.5s ease-in-out infinite; }
+    @keyframes segPulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+    /* ── SESSION LABEL ── */
+    #session-label {
+      font-size: 10px;
+      color: var(--muted);
+      text-align: center;
+      margin-bottom: 10px;
+    }
+
+    /* ── CONTROLS ── */
+    #controls {
+      display: flex;
+      gap: 6px;
+      justify-content: center;
+    }
+
+    .ov-btn {
+      background: rgba(255,255,255,0.06);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 11px;
+      font-weight: 600;
+      padding: 5px 10px;
+      cursor: pointer;
+      transition: all 0.15s;
+      -webkit-app-region: no-drag;
+      white-space: nowrap;
+    }
+    .ov-btn:hover { background: rgba(255,255,255,0.12); }
+    .ov-btn:active { transform: scale(0.95); }
+    .ov-btn-primary { background: rgba(124,106,247,0.25); border-color: rgba(124,106,247,0.4); color: #c4bcff; }
+    .ov-btn-primary:hover { background: rgba(124,106,247,0.4); }
+    .ov-btn-stop    { background: rgba(248,113,113,0.15); border-color: rgba(248,113,113,0.3); color: var(--danger); }
+    .ov-btn-skip    { background: rgba(250,204,21,0.15);  border-color: rgba(250,204,21,0.3);  color: var(--warning); }
+
+    /* ── IDLE STATE ── */
+    #idle-msg {
+      font-size: 12px;
+      color: var(--muted);
+      text-align: center;
+      padding: 4px 0;
+    }
+
+    /* ── CLOSE BTN ── */
+    #close-btn {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      font-size: 14px;
+      cursor: pointer;
+      -webkit-app-region: no-drag;
+      line-height: 1;
+      padding: 2px;
+      border-radius: 4px;
+      transition: color 0.15s;
+    }
+    #close-btn:hover { color: var(--danger); }
+
+    /* ── ANIMATIONS ── */
+    @keyframes fadeIn { from { opacity:0; transform: scale(0.95); } to { opacity:1; transform: scale(1); } }
+    #card { animation: fadeIn 0.2s ease; }
+  </style>
+</head>
+<body>
+  <div id="overlay">
+    <div id="card" class="state-idle">
+      <div id="drag-handle"></div>
+      <button id="close-btn" title="Tutup overlay">✕</button>
+
+      <!-- Running / Break state -->
+      <div id="active-ui" style="display:none;">
+        <div id="task-name">—</div>
+        <div id="state-label" class="label-idle">—</div>
+        <div id="timer" class="timer-idle">00:00</div>
+        <div id="seg-bar"></div>
+        <div id="session-label">—</div>
+        <div id="controls"></div>
+      </div>
+
+      <!-- Idle state -->
+      <div id="idle-ui">
+        <div id="idle-msg">Belum ada sesi aktif</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const { ipcRenderer } = require('electron')
+
+    let currentState = null
+
+    // ── Receive state from main app ──
+    ipcRenderer.on('session-update', (_, data) => {
+      currentState = data
+      render(data)
+    })
+
+    function render(data) {
+      const card      = document.getElementById('card')
+      const activeUI  = document.getElementById('active-ui')
+      const idleUI    = document.getElementById('idle-ui')
+
+      if (!data || data.state === 'idle' || data.state === 'done' || !data.taskName) {
+        card.className = 'state-idle'
+        activeUI.style.display = 'none'
+        idleUI.style.display   = 'block'
+        return
+      }
+
+      activeUI.style.display = 'block'
+      idleUI.style.display   = 'none'
+
+      const isBreak = data.state === 'break'
+
+      // Card border
+      card.className = isBreak ? 'state-break' : 'state-running'
+
+      // Task name
+      document.getElementById('task-name').textContent = data.taskName
+
+      // State label
+      const stateEl = document.getElementById('state-label')
+      stateEl.textContent  = isBreak ? '☕ BREAK' : '● FOCUS'
+      stateEl.className    = isBreak ? 'label-break' : 'label-run'
+
+      // Timer
+      const timerEl = document.getElementById('timer')
+      timerEl.textContent = formatTime(data.remainingSeconds ?? 0)
+      timerEl.className   = isBreak ? 'timer-break' : 'timer-run'
+
+      // Segment bar
+      const segBar = document.getElementById('seg-bar')
+      const segs   = data.sessions || []
+      segBar.innerHTML = segs.map((_, i) => {
+        const cls = i < data.completedSessions ? 'seg-done'
+                  : i === data.currentSession && !isBreak ? 'seg-active' : ''
+        return `<div class="seg ${cls}"></div>`
+      }).join('')
+
+      // Session label
+      document.getElementById('session-label').textContent =
+        `Sesi ${data.currentSession + 1} / ${data.sessions?.length || 1}`
+
+      // Controls
+      const ctrl = document.getElementById('controls')
+      if (isBreak) {
+        ctrl.innerHTML = `
+          <button class="ov-btn ov-btn-skip" id="btn-skip-break">Skip Break →</button>
+          <button class="ov-btn ov-btn-stop" id="btn-stop">Stop</button>
+        `
+        ctrl.querySelector('#btn-skip-break')?.addEventListener('click', () => {
+          ipcRenderer.send('overlay-action', { action: 'skip-break' })
+        })
+      } else {
+        ctrl.innerHTML = `
+          <button class="ov-btn ov-btn-primary" id="btn-done">✓ Selesai</button>
+          <button class="ov-btn ov-btn-stop"    id="btn-stop">✕ Stop</button>
+        `
+        ctrl.querySelector('#btn-done')?.addEventListener('click', () => {
+          ipcRenderer.send('overlay-action', { action: 'done-early' })
+        })
+      }
+
+      ctrl.querySelector('#btn-stop')?.addEventListener('click', () => {
+        ipcRenderer.send('overlay-action', { action: 'stop' })
+      })
+    }
+
+    // ── Close button ──
+    document.getElementById('close-btn').addEventListener('click', () => {
+      ipcRenderer.send('overlay-action', { action: 'hide-overlay' })
+    })
+
+    function formatTime(secs) {
+      const s = Math.max(0, Math.round(secs))
+      return `${String(Math.floor(s / 60)).padStart(2,'0')}:${String(s % 60).padStart(2,'0')}`
+    }
+  </script>
+</body>
+</html>

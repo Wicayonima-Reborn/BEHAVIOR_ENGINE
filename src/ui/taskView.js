@@ -450,6 +450,7 @@ function runTimer(task) {
     }
 
     updateTimerOnly(current.remainingSeconds)
+    syncOverlay(current)   // push to overlay window
   }, 1000)
 }
 
@@ -459,6 +460,7 @@ function runTimer(task) {
 
 function finishTask(task) {
   activeTaskId = null
+  syncOverlay({ state: 'done', taskName: task.name })  // signal overlay to hide
   deactivateSpotlight()
   const state = resolveTask(task.id, 'done')
   _onUpdate(state)
@@ -583,6 +585,77 @@ function refreshList() {
 function clearAll() {
   clearInterval(timerInterval)
   clearTimeout(antiResistTimer)
+}
+
+// ─────────────────────────────────────────
+// OVERLAY SYNC
+// ─────────────────────────────────────────
+
+/**
+ * Push current task state to the overlay window via Electron IPC.
+ * Safe to call in browser (no-op if electronAPI not available).
+ */
+function syncOverlay(task) {
+  if (!window.electronAPI?.sendSessionState) return
+  window.electronAPI.sendSessionState({
+    taskName:          task.name       || '',
+    state:             task.state      || 'idle',
+    remainingSeconds:  task.remainingSeconds ?? 0,
+    sessions:          task.sessions   || [],
+    currentSession:    task.currentSession    ?? 0,
+    completedSessions: task.completedSessions ?? 0
+  })
+}
+
+/**
+ * Listen for actions coming FROM the overlay window.
+ * Must be called once on init. Uses the current task via closure ref.
+ */
+export function bindOverlayActions() {
+  if (!window.electronAPI?.onOverlayAction) return
+
+  window.electronAPI.removeOverlayListeners?.()   // clean up old listeners first
+
+  window.electronAPI.onOverlayAction((data) => {
+    // We need the currently active task — fetch from storage
+    const { loadCurrentState } = window.__BE_ENGINE__ || {}
+    if (!loadCurrentState) return
+    const { tasks } = loadCurrentState()
+    const task = tasks.find(t => t.id === activeTaskId)
+    if (!task) return
+
+    if (data.action === 'stop') {
+      clearAll()
+      const updated = { ...handleInterrupt(task), state: 'idle' }
+      silentPersist(updated)
+      deactivateSpotlight()
+      activeTaskId = null
+      _onUpdate(loadCurrentState())
+    }
+
+    if (data.action === 'done-early') {
+      clearAll()
+      const updated = handleSessionComplete(task)
+      silentPersist(updated)
+      if (updated.state === 'done') {
+        finishTask(updated)
+      } else {
+        showMicroFeedback(updated.stats.completed)
+        syncOverlay(updated)
+        renderSpotlight(updated)
+        runTimer(updated)
+      }
+    }
+
+    if (data.action === 'skip-break') {
+      clearAll()
+      const next = startNextSession(task)
+      silentPersist(next)
+      syncOverlay(next)
+      renderSpotlight(next)
+      runTimer(next)
+    }
+  })
 }
 
 function formatTime(secs) {

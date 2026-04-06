@@ -3,7 +3,7 @@
 
 import { bootEngine, regenerateTasks, updateTaskState, loadCurrentState } from './engine/behaviorEngine.js'
 import { renderDashboard }             from './ui/dashboard.js'
-import { renderTaskView }              from './ui/taskView.js'
+import { renderTaskView, bindOverlayActions } from './ui/taskView.js'
 import { renderSettings }              from './ui/settingsView.js'
 
 // ── Global State ──────────────────────────────────────────────
@@ -16,6 +16,7 @@ window.__BE_ENGINE__ = { regenerateTasks, updateTaskState, loadCurrentState }
 function init() {
   const result = bootEngine()
   appState = result
+  bindOverlayActions()   // register overlay IPC action listener
   renderView('dashboard')
   bindNavigation()
   bindTitlebarControls()
