@@ -105,6 +105,15 @@ export function deleteActivity(name) {
 // REGENERATE
 // ─────────────────────────────────────────
 
+/**
+ * Load current state without mutation (for refreshList fallback).
+ */
+export function loadCurrentState() {
+  const data = loadData()
+  const mode = determineMode(data)
+  return { data, tasks: data.tasks || [], mode }
+}
+
 export function regenerateTasks() {
   const data = loadData()
   const mode = determineMode(data)

@@ -1,346 +1,508 @@
-// src/ui/taskView.js
-// Advanced session-based task execution UI
-// State machine: idle → running → break → running → done
+// src/ui/taskView.js  — Behavior Engine V2
+// Single Focus · Focus Atmosphere · Resume · Micro Feedback · Decision Simplification
 
-import { resolveTask, updateTaskState }         from '../engine/behaviorEngine.js'
+import { resolveTask, updateTaskState }           from '../engine/behaviorEngine.js'
 import { handleInterrupt, handleSessionComplete,
          startNextSession, getSessionProgress,
-         getBreakDuration }                      from '../engine/sessionEngine.js'
-import { getFeynmanPrompt }                      from '../engine/mentalEngine.js'
+         getBreakDuration, detectResumable }       from '../engine/sessionEngine.js'
+import { getFeynmanPrompt }                        from '../engine/mentalEngine.js'
 
 // ─────────────────────────────────────────
-// STATE
+// MODULE STATE
 // ─────────────────────────────────────────
 
-let timerInterval     = null   // countdown interval
-let antiResistTimer   = null   // anti-resistance CTA delay
-let activeTaskId      = null
+let timerInterval   = null
+let antiResistTimer = null
+let activeTaskId    = null
+let _tasks          = []
+let _mode           = 'normal'
+let _onUpdate       = null
+let _container      = null
 
-const ANTI_RESIST_DELAY = 8000 // 8 detik sebelum CTA muncul
+const ANTI_RESIST_DELAY = 12000 // 12 sec before CTA
 
-// Psychological tone per state
-const TONE = {
-  running : { lazy: "Cuma 5 menit. Serius.", normal: "Fokus sesi ini aja.", focus: "Zona aktif. Jangan buang momentum." },
-  break   : { lazy: "Istirahat 3 menit, jangan kabur.", normal: "Istirahat bentar, jangan kabur.", focus: "Recharge sebentar, lanjut lagi." },
-  done    : { lazy: "Selesai. Progress tetap progress.", normal: "Selesai. Progress tetap progress.", focus: "Solid. Streak lu terjaga." }
+// Entry mental trigger per mode
+const ENTRY_TONE = {
+  normal : (dur) => `Fokus sesi ini aja. Cuma ${dur} menit.`,
+  lazy   : (dur) => `Cuma ${dur} menit. Serius.`,
+  focus  : (dur) => `${dur} menit. Zona aktif. Jangan buang momentum.`
 }
 
+// Break tone
+const BREAK_TONE = {
+  normal: 'Istirahat bentar. Jangan kabur.',
+  lazy:   'Istirahat 3 menit. Oke, santai.',
+  focus:  'Recharge sebentar. Lanjut lagi.'
+}
+
+// Completion micro-feedback
+const DONE_LINES = [
+  'Good. Lanjut dikit lagi.',
+  'Satu sesi beres. Streak terjaga.',
+  'Lu tetap jalan walau dikit.',
+  'Progress tetap progress.',
+  'Solid. Satu lagi?'
+]
+
 // ─────────────────────────────────────────
-// RENDER
+// RENDER ENTRY
 // ─────────────────────────────────────────
 
-/**
- * @param {HTMLElement} container
- * @param {{ tasks: Array, mode: string }} state
- * @param {Function} onUpdate
- */
 export function renderTaskView(container, { tasks, mode }, onUpdate) {
+  _tasks = tasks; _mode = mode; _onUpdate = onUpdate; _container = container
+
+  const resumable = detectResumable(tasks)
+
   container.innerHTML = `
+    <!-- Resume Banner -->
+    <div class="resume-banner" id="resume-banner" style="display:none;"></div>
+
+    <!-- Session Spotlight (hidden until active) -->
+    <div class="spotlight-overlay" id="spotlight-overlay" style="display:none;"></div>
+
     <div class="tv-header">
       <h2 class="tv-title">Tasks</h2>
-      <button class="btn btn-ghost btn-sm" id="btn-regenerate">↺ Refresh Tasks</button>
+      <button class="btn btn-ghost btn-sm" id="btn-regenerate">↺ Refresh</button>
     </div>
 
-    <!-- Active Session Panel -->
-    <div class="session-panel card" id="session-panel" style="display:none;"></div>
+    <!-- Micro Feedback Toast -->
+    <div class="micro-toast" id="micro-toast"></div>
 
     <!-- Task List -->
-    <div class="card" id="task-list-wrap">
-      <p class="section-title">
-        Hari ini
-        <span class="mode-tag mode-${mode}">${mode.toUpperCase()}</span>
-      </p>
+    <div id="task-list-wrap">
       ${tasks.length === 0
-        ? `<p class="empty-state">Belum ada task. Tambah aktivitas di <strong>Settings</strong>.</p>`
+        ? `<div class="card"><p class="empty-state">Belum ada task. Tambah aktivitas di <strong>Settings</strong>.</p></div>`
         : `<ul class="task-list" id="task-list">
-            ${tasks.map(t => taskItemHTML(t)).join('')}
+            ${tasks.map(t => taskCardHTML(t)).join('')}
           </ul>`
       }
     </div>
 
     <!-- Feynman Modal -->
     <div class="feynman-overlay" id="feynman-overlay" style="display:none;">
-      <div class="feynman-modal card">
-        <p class="section-title">✦ Feynman Check</p>
+      <div class="feynman-modal card anim-scale-in">
+        <p class="feynman-label">✦ Feynman Check</p>
         <p class="feynman-text" id="feynman-text"></p>
-        <button class="btn btn-primary" id="feynman-close">Oke, udah ngerti 👍</button>
-        <button class="btn btn-ghost"   id="feynman-skip">Lewati</button>
+        <div class="feynman-actions">
+          <button class="btn btn-primary" id="feynman-close">Oke, ngerti 👍</button>
+          <button class="btn btn-ghost"   id="feynman-skip">Lewati</button>
+        </div>
       </div>
     </div>
   `
 
-  injectTaskStyles()
-  bindEvents(container, tasks, mode, onUpdate)
+  injectStyles()
+  bindGlobalEvents(container, tasks, mode, onUpdate)
 
-  // If there's already an active task, restore panel
-  const active = tasks.find(t => t.state === 'running' || t.state === 'break')
-  if (active) restoreSession(container, active, tasks, mode, onUpdate)
+  // Show resume banner if needed
+  if (resumable) showResumeBanner(container, resumable, tasks, mode, onUpdate)
 }
 
 // ─────────────────────────────────────────
-// TASK ITEM HTML
+// TASK CARD HTML
 // ─────────────────────────────────────────
 
-function taskItemHTML(t) {
-  const prog    = getSessionProgress(t)
-  const isDone  = t.state === 'done'  || t.status === 'done'
-  const isSkip  = t.status === 'skip'
-  const isRun   = t.state === 'running'
-  const isBreak = t.state === 'break'
-  const isDead  = isDone || isSkip
+function taskCardHTML(t) {
+  const prog   = getSessionProgress(t)
+  const isDone = t.state === 'done'  || t.status === 'done'
+  const isSkip = t.status === 'skip'
+  const isRun  = t.state === 'running'
+  const isBrk  = t.state === 'break'
+  const isDead = isDone || isSkip
+  const taskMode = t.mode || 'normal'
 
-  const segBar = t.sessions?.length > 1
-    ? `<div class="seg-bar">${t.sessions.map((_, i) => `
-        <div class="seg ${i < prog.completed ? 'seg-done' : i === prog.current && isRun ? 'seg-active' : ''}"></div>
-      `).join('')}</div>`
-    : ''
+  // Session segment blocks
+  const segs = (t.sessions || [{ _: t.duration }]).map((_, i) => {
+    const cls = i < prog.completed ? 'seg-done'
+              : i === prog.current && isRun ? 'seg-active' : ''
+    return `<div class="seg ${cls}"></div>`
+  }).join('')
+
+  // Current session duration label
+  const curDur = t.sessions?.[prog.current] ?? t.duration
 
   return `
-    <li class="task-item ${isDone ? 'status-done' : ''} ${isRun || isBreak ? 'status-active' : ''} ${isSkip ? 'status-skip' : ''}"
-        data-id="${t.id}">
-      <div class="task-main">
-        <div class="task-check ${isDone ? 'checked' : ''}">${isDone ? '✓' : ''}</div>
-        <div class="task-info">
-          <span class="task-name">${t.name}</span>
-          <div class="task-meta-row">
-            <span class="task-meta">${t.total || t.duration} mnt total</span>
-            ${t.sessions?.length > 1 ? `<span class="task-sessions">${prog.completed}/${prog.total} sesi</span>` : ''}
-            <span class="task-mode-tag mode-${t.mode || 'normal'}">${t.mode || 'normal'}</span>
+    <li class="task-card ${isDone ? 'tc-done' : ''} ${isRun || isBrk ? 'tc-active' : ''} ${isSkip ? 'tc-skip' : ''}"
+        data-id="${t.id}" id="tc-${t.id}">
+
+      <div class="tc-top">
+        <div class="tc-check ${isDone ? 'checked' : ''}">${isDone ? '✓' : ''}</div>
+        <div class="tc-info">
+          <span class="tc-name">${t.name}</span>
+          <div class="tc-meta-row">
+            <span class="tc-total">${t.total ?? t.duration} mnt</span>
+            ${t.sessions?.length > 1 ? `<span class="tc-segs-label">${prog.completed}/${prog.total} sesi</span>` : ''}
+            <span class="tc-mode-chip chip-${taskMode}">${taskMode}</span>
           </div>
-          ${segBar}
         </div>
-        <div class="task-actions">
-          ${!isDead && !isRun && !isBreak ? `
-            <button class="btn btn-primary btn-sm" data-action="start" data-id="${t.id}">▶ Mulai</button>
-            <button class="btn btn-ghost  btn-sm" data-action="skip"  data-id="${t.id}">Skip</button>
-          ` : ''}
-          ${isRun   ? `<span class="badge badge-run">● Running</span>` : ''}
-          ${isBreak ? `<span class="badge badge-break">☕ Break</span>` : ''}
-          ${isDone  ? `<span class="badge badge-done">✓ Selesai</span>` : ''}
-          ${isSkip  ? `<span class="badge badge-skip">Dilewati</span>` : ''}
+        <div class="tc-status">
+          ${isRun  ? `<span class="chip chip-run">● Running</span>` : ''}
+          ${isBrk  ? `<span class="chip chip-break">☕ Break</span>` : ''}
+          ${isDone ? `<span class="chip chip-done">✓ Done</span>` : ''}
+          ${isSkip ? `<span class="chip chip-skip">Skip</span>` : ''}
         </div>
       </div>
+
+      <!-- Segment progress bar -->
+      ${t.sessions?.length > 1 || isRun || isBrk
+        ? `<div class="seg-bar">${segs}</div>` : ''}
+
+      <!-- Action buttons (only when idle & not dead) -->
+      ${!isDead && !isRun && !isBrk ? `
+        <div class="tc-actions">
+          <button class="btn btn-primary tc-btn-start" data-action="start-full" data-id="${t.id}">
+            ▶ Mulai ${curDur}m
+          </button>
+          ${curDur > 5 ? `
+            <button class="btn btn-soft tc-btn-mini" data-action="start-mini" data-id="${t.id}">
+              ▶ Mulai 5m aja
+            </button>` : ''}
+          <button class="btn btn-ghost tc-btn-skip" data-action="skip" data-id="${t.id}">Skip</button>
+        </div>
+      ` : ''}
     </li>
   `
 }
 
 // ─────────────────────────────────────────
-// EVENT BINDING
+// GLOBAL EVENT BINDING
 // ─────────────────────────────────────────
 
-function bindEvents(container, tasks, mode, onUpdate) {
+function bindGlobalEvents(container, tasks, mode, onUpdate) {
   container.querySelector('#task-list')?.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-action]')
     if (!btn) return
     const { action, id } = btn.dataset
-    const task = tasks.find(t => t.id === id)
+    const task = _tasks.find(t => t.id === id)
     if (!task) return
 
-    if (action === 'start') beginSession(container, task, tasks, mode, onUpdate)
-    if (action === 'skip')  skipTask(id, container, tasks, mode, onUpdate)
+    if (action === 'start-full') startSession(task, false)
+    if (action === 'start-mini') startSession(task, true)
+    if (action === 'skip')       doSkipTask(id)
   })
 
   container.querySelector('#btn-regenerate')?.addEventListener('click', () => {
+    clearAll()
     const { regenerateTasks } = window.__BE_ENGINE__ || {}
-    if (regenerateTasks) onUpdate(regenerateTasks())
+    if (regenerateTasks) _onUpdate(regenerateTasks())
   })
 
-  container.querySelector('#feynman-close')?.addEventListener('click', () => {
-    container.querySelector('#feynman-overlay').style.display = 'none'
-  })
-  container.querySelector('#feynman-skip')?.addEventListener('click', () => {
-    container.querySelector('#feynman-overlay').style.display = 'none'
-  })
+  container.querySelector('#feynman-close')?.addEventListener('click', hideFeynman)
+  container.querySelector('#feynman-skip')?.addEventListener('click',  hideFeynman)
 }
 
 // ─────────────────────────────────────────
 // SESSION START
 // ─────────────────────────────────────────
 
-function beginSession(container, task, tasks, mode, onUpdate) {
+function startSession(rawTask, miniMode) {
   clearAll()
-  activeTaskId = task.id
+  activeTaskId = rawTask.id
 
-  // Build session task if not yet built
-  let t = { ...task }
-  if (!t.sessions) {
-    t.sessions           = [t.duration]
-    t.currentSession     = 0
-    t.completedSessions  = 0
-    t.state              = 'idle'
-    t.stats              = { completed: 0, skipped: 0, streak: 0 }
-    t.remainingSeconds   = t.duration * 60
+  // Build or reuse session task
+  let task = { ...rawTask }
+  if (!task.sessions || task.sessions.length === 0) {
+    task.sessions          = [task.duration]
+    task.currentSession    = 0
+    task.completedSessions = 0
+    task.stats             = { completed: 0, skipped: 0, streak: 0 }
+    task.remainingSeconds  = task.duration * 60
   }
 
-  t.state = 'running'
-  persistAndRefresh(t, tasks, onUpdate)
-  runSessionTimer(container, t, tasks, mode, onUpdate)
+  // Mini mode: override first session to 5 min
+  if (miniMode && task.sessions[task.currentSession] > 5) {
+    task.sessions = [...task.sessions]
+    task.sessions[task.currentSession] = 5
+    task.remainingSeconds = 5 * 60
+  }
+
+  task.state = 'running'
+  silentPersist(task)
+  activateSpotlight(task)
+  runTimer(task)
 }
 
-function restoreSession(container, task, tasks, mode, onUpdate) {
-  activeTaskId = task.id
-  runSessionTimer(container, task, tasks, mode, onUpdate)
+// ─────────────────────────────────────────
+// SPOTLIGHT / FOCUS ATMOSPHERE
+// ─────────────────────────────────────────
+
+function activateSpotlight(task) {
+  // Dim sidebar
+  document.querySelector('#sidebar')?.classList.add('session-active')
+  document.querySelector('#main-panel')?.classList.add('session-active')
+
+  // Set mode atmosphere on body
+  document.body.className = `mode-${task.mode || _mode}`
+
+  // Render spotlight panel
+  const overlay = _container.querySelector('#spotlight-overlay')
+  if (!overlay) return
+
+  overlay.style.display = 'block'
+  overlay.classList.add('anim-scale-in')
+  renderSpotlight(task)
+
+  // Dim other task cards
+  dimOtherCards(task.id)
+
+  // Start anti-resist timer (while idle, before timer starts it's cleared)
+  startAntiResist(task)
+}
+
+function deactivateSpotlight() {
+  document.querySelector('#sidebar')?.classList.remove('session-active')
+  document.querySelector('#main-panel')?.classList.remove('session-active')
+  document.body.className = `mode-${_mode}`
+
+  const overlay = _container?.querySelector('#spotlight-overlay')
+  if (overlay) overlay.style.display = 'none'
+
+  // Un-dim all cards
+  _container?.querySelectorAll('.task-card').forEach(c => {
+    c.style.opacity = '1'
+    c.style.filter  = ''
+  })
+}
+
+function dimOtherCards(activeId) {
+  _container?.querySelectorAll('.task-card').forEach(c => {
+    if (c.dataset.id !== activeId) {
+      c.style.opacity = '0.3'
+      c.style.filter  = 'blur(1px)'
+    }
+  })
+}
+
+// ─────────────────────────────────────────
+// SPOTLIGHT RENDER
+// ─────────────────────────────────────────
+
+function renderSpotlight(task) {
+  const overlay = _container?.querySelector('#spotlight-overlay')
+  if (!overlay) return
+
+  const prog     = getSessionProgress(task)
+  const isBreak  = task.state === 'break'
+  const taskMode = task.mode || _mode
+  const isRunning = task.state === 'running'
+
+  const tone = isBreak
+    ? BREAK_TONE[taskMode] || BREAK_TONE.normal
+    : (ENTRY_TONE[taskMode] || ENTRY_TONE.normal)(task.sessions?.[prog.current] ?? task.duration)
+
+  const segs = (task.sessions || []).map((_, i) => {
+    const cls = i < prog.completed ? 'sp-seg-done'
+              : i === prog.current && isRunning ? 'sp-seg-active' : ''
+    return `<div class="sp-seg ${cls}"></div>`
+  }).join('')
+
+  overlay.innerHTML = `
+    <div class="sp-card card glow-active anim-scale-in">
+
+      <!-- Header -->
+      <div class="sp-header">
+        <span class="sp-task-name">${task.name}</span>
+        <span class="sp-state-chip ${isBreak ? 'chip-break' : 'chip-run'}">
+          ${isBreak ? '☕ Break' : `Sesi ${prog.current + 1} / ${prog.total}`}
+        </span>
+      </div>
+
+      <!-- Tone / entry trigger -->
+      <p class="sp-tone">${tone}</p>
+
+      <!-- Segment bar -->
+      <div class="sp-seg-bar">${segs}</div>
+
+      <!-- BIG TIMER -->
+      <div class="sp-timer ${isBreak ? 'timer-break' : 'timer-run'}" id="sp-timer">
+        ${formatTime(task.remainingSeconds ?? (task.sessions?.[prog.current] ?? task.duration) * 60)}
+      </div>
+
+      <!-- Sub label -->
+      <div class="sp-sub" id="sp-sub">
+        ${isBreak
+          ? `Break ${getBreakDuration(task.completedSessions, taskMode)} mnt`
+          : `${task.sessions?.[prog.current] ?? task.duration} mnt · ${taskMode} mode`}
+      </div>
+
+      <!-- Anti-resist CTA -->
+      <div class="anti-resist" id="anti-resist" style="display:none;">
+        <span>Mulai 5 menit aja dulu.</span>
+        <button class="btn btn-primary btn-sm" id="ar-start">Mulai Sekarang</button>
+      </div>
+
+      <!-- Controls -->
+      <div class="sp-controls">
+        ${isBreak ? `
+          <button class="btn btn-primary" id="sp-skip-break">Lewati Break →</button>
+        ` : `
+          <button class="btn btn-success" id="sp-done-early">✓ Selesai Lebih Awal</button>
+          <button class="btn btn-ghost"   id="sp-stop">✕ Stop Sesi</button>
+        `}
+      </div>
+
+      <!-- Abandon (secondary, small) -->
+      <div class="sp-abandon">
+        <button class="btn btn-danger" id="sp-abandon">Abandon Task</button>
+      </div>
+    </div>
+  `
+
+  bindSpotlightEvents(task)
+}
+
+function updateTimerOnly(secs) {
+  const el = _container?.querySelector('#sp-timer')
+  if (el) el.textContent = formatTime(secs)
+}
+
+// ─────────────────────────────────────────
+// SPOTLIGHT EVENT BINDING
+// ─────────────────────────────────────────
+
+function bindSpotlightEvents(task) {
+  const c = _container
+
+  // Break: skip break
+  c.querySelector('#sp-skip-break')?.addEventListener('click', () => {
+    clearAll()
+    const next = startNextSession(task)
+    silentPersist(next)
+    renderSpotlight(next)
+    runTimer(next)
+  })
+
+  // Done early
+  c.querySelector('#sp-done-early')?.addEventListener('click', () => {
+    clearAll()
+    let updated = handleSessionComplete(task)
+    silentPersist(updated)
+
+    if (updated.state === 'done') {
+      finishTask(updated)
+    } else {
+      showMicroFeedback(updated.stats.completed)
+      renderSpotlight(updated)
+      runTimer(updated)
+    }
+  })
+
+  // Stop session (interrupt)
+  c.querySelector('#sp-stop')?.addEventListener('click', () => {
+    clearAll()
+    const updated = { ...handleInterrupt(task), state: 'idle' }
+    silentPersist(updated)
+    deactivateSpotlight()
+    activeTaskId = null
+    refreshList()
+  })
+
+  // Abandon task
+  c.querySelector('#sp-abandon')?.addEventListener('click', () => {
+    clearAll()
+    activeTaskId = null
+    deactivateSpotlight()
+    const state = resolveTask(task.id, 'skip')
+    _onUpdate(state)
+  })
+
+  // Anti-resist start now
+  c.querySelector('#ar-start')?.addEventListener('click', () => {
+    c.querySelector('#anti-resist').style.display = 'none'
+    // just reinforce — timer is already running
+  })
 }
 
 // ─────────────────────────────────────────
 // TIMER ENGINE
 // ─────────────────────────────────────────
 
-function runSessionTimer(container, task, tasks, mode, onUpdate) {
+function runTimer(task) {
   clearInterval(timerInterval)
-  renderSessionPanel(container, task, tasks, mode, onUpdate)
+  let current = { ...task }
 
   timerInterval = setInterval(() => {
-    task = { ...task, remainingSeconds: (task.remainingSeconds || 0) - 1 }
+    current = { ...current, remainingSeconds: (current.remainingSeconds ?? 0) - 1 }
 
-    if (task.remainingSeconds <= 0) {
+    if (current.remainingSeconds <= 0) {
       clearInterval(timerInterval)
 
-      if (task.state === 'running') {
-        // Session complete
-        task = handleSessionComplete(task)
-        persistAndRefresh(task, tasks, onUpdate)
+      if (current.state === 'running') {
+        let updated = handleSessionComplete(current)
+        silentPersist(updated)
 
-        if (task.state === 'done') {
-          activeTaskId = null
-          hidePanelAndRefresh(container, task, tasks, onUpdate)
-          showFeynman(container, task.name)
+        if (updated.state === 'done') {
+          finishTask(updated)
           return
         }
 
-        // Start break
-        renderSessionPanel(container, task, tasks, mode, onUpdate)
-        runSessionTimer(container, task, tasks, mode, onUpdate)
+        showMicroFeedback(updated.stats.completed)
+        renderSpotlight(updated)
+        runTimer(updated)
 
-      } else if (task.state === 'break') {
-        // Break over → next session
-        task = startNextSession(task)
-        persistAndRefresh(task, tasks, onUpdate)
-        renderSessionPanel(container, task, tasks, mode, onUpdate)
-        runSessionTimer(container, task, tasks, mode, onUpdate)
+      } else if (current.state === 'break') {
+        const next = startNextSession(current)
+        silentPersist(next)
+        renderSpotlight(next)
+        runTimer(next)
       }
       return
     }
 
-    // Update timer display only (no full re-render)
-    updateTimerDisplay(container, task)
+    updateTimerOnly(current.remainingSeconds)
   }, 1000)
 }
 
 // ─────────────────────────────────────────
-// SESSION PANEL RENDER
+// FINISH TASK
 // ─────────────────────────────────────────
 
-function renderSessionPanel(container, task, tasks, mode, onUpdate) {
-  const panel = container.querySelector('#session-panel')
-  if (!panel) return
-  panel.style.display = 'block'
+function finishTask(task) {
+  activeTaskId = null
+  deactivateSpotlight()
+  const state = resolveTask(task.id, 'done')
+  _onUpdate(state)
+  showFeynman(task.name)
+}
 
-  const prog     = getSessionProgress(task)
-  const isBreak  = task.state === 'break'
-  const taskMode = task.mode || mode
-  const tone     = TONE[task.state]?.[taskMode] || TONE[task.state]?.normal || ''
+// ─────────────────────────────────────────
+// RESUME BANNER
+// ─────────────────────────────────────────
 
-  const sessionDur = isBreak
-    ? getBreakDuration(task.completedSessions, taskMode)
-    : (task.sessions?.[task.currentSession] || task.duration)
+function showResumeBanner(container, resumable, tasks, mode, onUpdate) {
+  const banner = container.querySelector('#resume-banner')
+  if (!banner) return
 
-  panel.innerHTML = `
-    <div class="sp-top">
-      <div class="sp-task-name">${task.name}</div>
-      <div class="sp-state-badge ${isBreak ? 'badge-break' : 'badge-run'}">
-        ${isBreak ? '☕ Break' : '● Sesi ' + (prog.current + 1) + ' / ' + prog.total}
-      </div>
-    </div>
+  const { task, sessionLabel, isBreak } = resumable
 
-    <div class="sp-tone">${tone}</div>
-
-    <!-- Segment progress bar -->
-    <div class="sp-seg-bar">
-      ${(task.sessions || []).map((_, i) => `
-        <div class="sp-seg ${i < prog.completed ? 'sp-done'
-                           : i === prog.current && !isBreak ? 'sp-active' : ''}">
+  banner.style.display = 'block'
+  banner.innerHTML = `
+    <div class="resume-inner anim-fade-down">
+      <div class="resume-info">
+        <span class="resume-icon">${isBreak ? '☕' : '⏸'}</span>
+        <div>
+          <span class="resume-task">${task.name}</span>
+          <span class="resume-sub">Berhenti di ${sessionLabel}${isBreak ? ' · Break' : ''}</span>
         </div>
-      `).join('')}
-    </div>
-
-    <!-- Big timer -->
-    <div class="sp-timer ${isBreak ? 'timer-break' : ''}" id="sp-timer">
-      ${formatTime(task.remainingSeconds || sessionDur * 60)}
-    </div>
-
-    <div class="sp-sub">${isBreak ? 'Break ' + sessionDur + ' mnt' : sessionDur + ' mnt · ' + taskMode + ' mode'}</div>
-
-    <!-- Anti-resistance CTA (hidden initially) -->
-    <div class="anti-resist" id="anti-resist" style="display:none;">
-      Mulai 5 menit aja dulu. Serius.
-    </div>
-
-    <!-- Controls -->
-    <div class="sp-controls">
-      ${!isBreak ? `
-        <button class="btn btn-ghost" id="sp-interrupt">✕ Stop Sesi</button>
-        <button class="btn btn-success" id="sp-complete-manual">✓ Selesai Lebih Awal</button>
-      ` : `
-        <button class="btn btn-primary" id="sp-skip-break">Lewati Break →</button>
-      `}
-      <button class="btn btn-danger" id="sp-give-up">Abandon Task</button>
+      </div>
+      <div class="resume-actions">
+        <button class="btn btn-primary btn-sm" id="btn-resume">Resume →</button>
+        <button class="btn btn-ghost   btn-sm" id="btn-reset-resume">Reset</button>
+      </div>
     </div>
   `
 
-  bindPanelEvents(container, task, tasks, mode, onUpdate)
-  startAntiResist(container, task)
-}
-
-function updateTimerDisplay(container, task) {
-  const el = container.querySelector('#sp-timer')
-  if (el) el.textContent = formatTime(task.remainingSeconds)
-}
-
-// ─────────────────────────────────────────
-// PANEL BUTTON EVENTS
-// ─────────────────────────────────────────
-
-function bindPanelEvents(container, task, tasks, mode, onUpdate) {
-  // Stop session (interrupt)
-  container.querySelector('#sp-interrupt')?.addEventListener('click', () => {
-    clearAll()
-    const updated = { ...handleInterrupt(task), state: 'idle' }
-    persistAndRefresh(updated, tasks, onUpdate)
-    hidePanelAndRefresh(container, updated, tasks, onUpdate)
+  banner.querySelector('#btn-resume')?.addEventListener('click', () => {
+    banner.style.display = 'none'
+    startSession(task, false)
   })
 
-  // Manual complete
-  container.querySelector('#sp-complete-manual')?.addEventListener('click', () => {
-    clearAll()
-    let updated = handleSessionComplete(task)
-    persistAndRefresh(updated, tasks, onUpdate)
-
-    if (updated.state === 'done') {
-      activeTaskId = null
-      hidePanelAndRefresh(container, updated, tasks, onUpdate)
-      showFeynman(container, task.name)
-    } else {
-      renderSessionPanel(container, updated, tasks, mode, onUpdate)
-      runSessionTimer(container, updated, tasks, mode, onUpdate)
-    }
-  })
-
-  // Skip break
-  container.querySelector('#sp-skip-break')?.addEventListener('click', () => {
-    clearAll()
-    const updated = startNextSession(task)
-    persistAndRefresh(updated, tasks, onUpdate)
-    renderSessionPanel(container, updated, tasks, mode, onUpdate)
-    runSessionTimer(container, updated, tasks, mode, onUpdate)
-  })
-
-  // Abandon task
-  container.querySelector('#sp-give-up')?.addEventListener('click', () => {
-    clearAll()
-    activeTaskId = null
-    const state = resolveTask(task.id, 'skip')
-    onUpdate(state)
+  banner.querySelector('#btn-reset-resume')?.addEventListener('click', () => {
+    banner.style.display = 'none'
+    // Reset task state to idle
+    const reset = { ...task, state: 'idle', currentSession: 0, completedSessions: 0, remainingSeconds: task.sessions?.[0] * 60 }
+    silentPersist(reset)
+    refreshList()
   })
 }
 
@@ -348,50 +510,74 @@ function bindPanelEvents(container, task, tasks, mode, onUpdate) {
 // ANTI-RESISTANCE
 // ─────────────────────────────────────────
 
-function startAntiResist(container, task) {
+function startAntiResist(task) {
   clearTimeout(antiResistTimer)
-  if (task.state !== 'idle') return
-
   antiResistTimer = setTimeout(() => {
-    const el = container.querySelector('#anti-resist')
-    if (el) {
-      el.style.display = 'block'
+    const el = _container?.querySelector('#anti-resist')
+    if (el && task.state !== 'running') {
+      el.style.display = 'flex'
       el.classList.add('ar-visible')
     }
   }, ANTI_RESIST_DELAY)
 }
 
 // ─────────────────────────────────────────
-// HELPERS
+// MICRO FEEDBACK TOAST
 // ─────────────────────────────────────────
 
-function skipTask(taskId, container, tasks, mode, onUpdate) {
-  clearAll()
-  const state = resolveTask(taskId, 'skip')
-  onUpdate(state)
+function showMicroFeedback(sessionsDone) {
+  const toast = _container?.querySelector('#micro-toast')
+  if (!toast) return
+
+  const line = DONE_LINES[Math.floor(Math.random() * DONE_LINES.length)]
+  toast.textContent = `+1 sesi · ${line}`
+  toast.classList.add('toast-show')
+
+  setTimeout(() => toast.classList.remove('toast-show'), 3000)
 }
 
-function persistAndRefresh(updatedTask, tasks, onUpdate) {
-  const state = updateTaskState(updatedTask.id, updatedTask)
-  // Don't call onUpdate here to avoid re-render during timer
-  // Only persist silently
-}
+// ─────────────────────────────────────────
+// FEYNMAN
+// ─────────────────────────────────────────
 
-function hidePanelAndRefresh(container, task, tasks, onUpdate) {
-  const panel = container.querySelector('#session-panel')
-  if (panel) panel.style.display = 'none'
-  // Trigger full re-render
-  const { loadData } = window.__BE_DATA__ || {}
-  const state = updateTaskState(task.id, task)
-  onUpdate(state)
-}
-
-function showFeynman(container, taskName) {
-  const overlay = container.querySelector('#feynman-overlay')
-  const text    = container.querySelector('#feynman-text')
+function showFeynman(taskName) {
+  const overlay = _container?.querySelector('#feynman-overlay')
+  const text    = _container?.querySelector('#feynman-text')
   if (!overlay || !text) return
   text.textContent = getFeynmanPrompt(taskName)
   overlay.style.display = 'flex'
+}
+
+function hideFeynman() {
+  const overlay = _container?.querySelector('#feynman-overlay')
+  if (overlay) overlay.style.display = 'none'
+}
+
+// ─────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────
+
+function doSkipTask(taskId) {
+  clearAll()
+  activeTaskId = null
+  const state = resolveTask(taskId, 'skip')
+  _onUpdate(state)
+}
+
+function silentPersist(task) {
+  const { updateTaskState } = window.__BE_ENGINE__ || {}
+  if (updateTaskState) updateTaskState(task.id, task)
+}
+
+function refreshList() {
+  const { loadCurrentState } = window.__BE_ENGINE__ || {}
+  if (loadCurrentState) _onUpdate(loadCurrentState())
+  else {
+    // Fallback: reload from storage via boot
+    import('../engine/behaviorEngine.js').then(({ bootEngine }) => {
+      _onUpdate(bootEngine())
+    })
+  }
 }
 
 function clearAll() {
@@ -400,154 +586,211 @@ function clearAll() {
 }
 
 function formatTime(secs) {
-  const s = Math.max(0, secs)
-  const m = String(Math.floor(s / 60)).padStart(2, '0')
-  const r = String(s % 60).padStart(2, '0')
-  return `${m}:${r}`
+  const s = Math.max(0, Math.round(secs))
+  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
 }
 
 // ─────────────────────────────────────────
 // STYLES
 // ─────────────────────────────────────────
 
-function injectTaskStyles() {
-  if (document.getElementById('task-styles')) return
+function injectStyles() {
+  if (document.getElementById('task-v2-styles')) return
   const s = document.createElement('style')
-  s.id = 'task-styles'
+  s.id = 'task-v2-styles'
   s.textContent = `
-    /* Header */
-    .tv-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+    /* ── HEADER ── */
+    .tv-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
     .tv-title  { font-size: 22px; font-weight: 700; }
-    .mode-tag  { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 10px; font-weight: 700; letter-spacing: 0.08em; margin-left: 8px; vertical-align: middle; }
-    .mode-tag.mode-normal { background: var(--accent-glow); color: var(--accent); }
-    .mode-tag.mode-lazy   { background: rgba(248,113,113,0.15); color: var(--danger); }
-    .mode-tag.mode-focus  { background: rgba(74,222,128,0.15);  color: var(--success); }
 
-    /* ── SESSION PANEL ── */
-    .session-panel {
-      margin-bottom: 20px;
+    /* ── RESUME BANNER ── */
+    .resume-banner { margin-bottom: 16px; }
+    .resume-inner {
+      background: var(--bg-card);
       border: 1px solid var(--accent);
-      background: linear-gradient(135deg, var(--bg-card) 0%, rgba(124,106,247,0.05) 100%);
+      border-radius: var(--radius);
+      padding: 14px 18px;
+      display: flex; align-items: center; justify-content: space-between; gap: 16px;
     }
-    .sp-top   { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-    .sp-task-name { font-size: 16px; font-weight: 700; color: var(--text-primary); }
-    .sp-state-badge { font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 99px; }
-    .badge-run   { background: var(--accent-glow); color: var(--accent); }
-    .badge-break { background: rgba(250,204,21,0.15); color: var(--warning); }
+    .resume-info   { display: flex; align-items: center; gap: 12px; }
+    .resume-icon   { font-size: 20px; }
+    .resume-task   { display: block; font-weight: 700; font-size: 14px; color: var(--text-primary); }
+    .resume-sub    { font-size: 12px; color: var(--text-muted); }
+    .resume-actions { display: flex; gap: 8px; flex-shrink: 0; }
 
-    .sp-tone { font-size: 12px; color: var(--text-muted); font-style: italic; margin-bottom: 16px; }
+    /* ── MICRO TOAST ── */
+    .micro-toast {
+      position: fixed;
+      bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px);
+      background: var(--bg-card);
+      border: 1px solid var(--success);
+      color: var(--success);
+      border-radius: 99px;
+      padding: 8px 20px;
+      font-size: 13px;
+      font-weight: 600;
+      opacity: 0;
+      transition: opacity 0.3s, transform 0.3s;
+      pointer-events: none;
+      z-index: 200;
+      white-space: nowrap;
+    }
+    .micro-toast.toast-show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
-    /* Segment bar */
-    .sp-seg-bar { display: flex; gap: 5px; margin-bottom: 20px; }
+    /* ── SPOTLIGHT OVERLAY ── */
+    .spotlight-overlay {
+      margin-bottom: 20px;
+    }
+    .sp-card {
+      padding: 28px;
+      animation: glowPulse 3s ease-in-out infinite;
+    }
+    .sp-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 6px;
+    }
+    .sp-task-name { font-size: 18px; font-weight: 800; color: var(--text-primary); }
+    .sp-state-chip { font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 99px; }
+
+    .sp-tone {
+      font-size: 13px; color: var(--text-muted); font-style: italic;
+      margin: 12px 0 20px;
+    }
+
+    /* Segment bar — spotlight */
+    .sp-seg-bar { display: flex; gap: 6px; margin-bottom: 24px; }
     .sp-seg {
-      flex: 1; height: 6px; border-radius: 99px;
+      flex: 1; height: 5px; border-radius: 99px;
       background: var(--border);
       transition: background 0.3s;
     }
-    .sp-done   { background: var(--success); }
-    .sp-active { background: var(--accent); animation: segPulse 1.5s ease-in-out infinite; }
-    @keyframes segPulse {
-      0%, 100% { opacity: 1; }
-      50%       { opacity: 0.5; }
-    }
+    .sp-seg-done   { background: var(--success); }
+    .sp-seg-active { background: var(--mode-accent, var(--accent)); animation: pulse 1.5s ease-in-out infinite; }
 
-    /* Big timer */
+    /* BIG TIMER */
     .sp-timer {
-      font-size: 64px;
+      font-size: 72px;
       font-weight: 800;
-      color: var(--accent);
-      letter-spacing: 0.05em;
+      letter-spacing: 0.04em;
       font-variant-numeric: tabular-nums;
       text-align: center;
       line-height: 1;
-      margin-bottom: 8px;
+      margin-bottom: 10px;
     }
-    .sp-timer.timer-break { color: var(--warning); }
+    .timer-run   { color: var(--mode-timer, var(--accent)); }
+    .timer-break { color: var(--warning); }
 
-    .sp-sub { text-align: center; font-size: 12px; color: var(--text-muted); margin-bottom: 20px; }
-
-    /* Anti-resistance */
-    .anti-resist {
+    .sp-sub {
       text-align: center;
-      background: rgba(124,106,247,0.1);
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 24px;
+    }
+
+    /* Anti-resist */
+    .anti-resist {
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(124,106,247,0.08);
       border: 1px dashed var(--accent);
       border-radius: var(--radius-sm);
-      padding: 10px;
+      padding: 10px 14px;
       font-size: 13px;
       color: var(--accent);
       margin-bottom: 16px;
       opacity: 0;
-      transition: opacity 0.5s;
+      transition: opacity 0.4s;
     }
     .anti-resist.ar-visible { opacity: 1; }
 
     /* Controls */
-    .sp-controls { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+    .sp-controls { display: flex; gap: 10px; justify-content: center; margin-bottom: 12px; }
+    .sp-abandon  { text-align: center; }
 
     /* ── TASK LIST ── */
-    .task-list  { list-style: none; display: flex; flex-direction: column; gap: 12px; }
-    .task-item  {
-      padding: 14px;
-      border-radius: var(--radius-sm);
-      background: var(--bg-hover);
+    .task-list { list-style: none; display: flex; flex-direction: column; gap: 10px; }
+    .task-card {
+      background: var(--bg-card);
       border: 1px solid var(--border);
-      transition: border 0.2s;
+      border-radius: var(--radius);
+      padding: 16px;
+      transition: opacity 0.3s, filter 0.3s, border-color 0.3s, transform 0.2s;
     }
-    .task-item.status-done   { opacity: 0.45; }
-    .task-item.status-active { border-color: var(--accent); }
-    .task-item.status-skip   { opacity: 0.35; }
+    .task-card:not(.tc-done):not(.tc-skip):not(.tc-active):hover { border-color: var(--text-muted); }
+    .task-card.tc-done { opacity: 0.4; }
+    .task-card.tc-skip { opacity: 0.3; }
+    .task-card.tc-active {
+      border-color: var(--mode-accent, var(--accent));
+      background: linear-gradient(135deg, var(--bg-card) 0%, var(--accent-glow) 100%);
+    }
 
-    .task-main  { display: flex; align-items: flex-start; gap: 12px; }
-    .task-check {
+    .tc-top  { display: flex; align-items: flex-start; gap: 12px; }
+    .tc-check {
       width: 22px; height: 22px; border-radius: 50%;
       border: 2px solid var(--border);
       display: flex; align-items: center; justify-content: center;
       font-size: 11px; flex-shrink: 0; margin-top: 2px;
+      transition: all 0.2s;
     }
-    .task-check.checked { background: var(--success); border-color: var(--success); color: #000; font-weight: 800; }
+    .tc-check.checked { background: var(--success); border-color: var(--success); color: #000; font-weight: 800; }
 
-    .task-info   { flex: 1; }
-    .task-name   { font-size: 14px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px; }
-    .task-item.status-done .task-name { text-decoration: line-through; color: var(--text-muted); }
+    .tc-info   { flex: 1; }
+    .tc-name   { display: block; font-size: 14px; font-weight: 700; color: var(--text-primary); margin-bottom: 4px; }
+    .tc-done .tc-name { text-decoration: line-through; color: var(--text-muted); }
 
-    .task-meta-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-    .task-meta     { font-size: 12px; color: var(--text-muted); }
-    .task-sessions { font-size: 11px; color: var(--text-muted); }
-    .task-mode-tag { font-size: 10px; padding: 1px 6px; border-radius: 99px; font-weight: 700; }
-    .task-mode-tag.mode-normal { background: var(--accent-glow); color: var(--accent); }
-    .task-mode-tag.mode-lazy   { background: rgba(248,113,113,0.12); color: var(--danger); }
-    .task-mode-tag.mode-focus  { background: rgba(74,222,128,0.12);  color: var(--success); }
+    .tc-meta-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .tc-total, .tc-segs-label { font-size: 12px; color: var(--text-muted); }
 
-    /* Segment bar mini */
-    .seg-bar   { display: flex; gap: 3px; margin-top: 8px; }
-    .seg       { flex: 1; height: 4px; border-radius: 99px; background: var(--border); max-width: 32px; }
-    .seg-done  { background: var(--success); }
-    .seg-active { background: var(--accent); }
+    .tc-mode-chip, .chip {
+      font-size: 10px; font-weight: 700; padding: 2px 8px;
+      border-radius: 99px; letter-spacing: 0.06em;
+    }
+    .chip-normal, .tc-mode-chip.chip-normal { background: var(--accent-glow); color: var(--accent); }
+    .chip-lazy,   .tc-mode-chip.chip-lazy   { background: rgba(248,113,113,0.12); color: var(--danger); }
+    .chip-focus,  .tc-mode-chip.chip-focus  { background: rgba(74,222,128,0.12);  color: var(--success); }
+    .chip-run     { background: var(--accent-glow); color: var(--accent); }
+    .chip-break   { background: rgba(250,204,21,0.12); color: var(--warning); }
+    .chip-done    { color: var(--success); background: rgba(74,222,128,0.1); }
+    .chip-skip    { color: var(--text-muted); }
 
-    .task-actions { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
-    .btn-sm    { padding: 5px 10px; font-size: 12px; }
+    .tc-status { flex-shrink: 0; }
 
-    /* Badges */
-    .badge { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 99px; }
-    .badge-run   { background: var(--accent-glow); color: var(--accent); }
-    .badge-break { background: rgba(250,204,21,0.12); color: var(--warning); }
-    .badge-done  { color: var(--success); }
-    .badge-skip  { color: var(--text-muted); }
+    /* Segment bar (mini, in task card) */
+    .seg-bar { display: flex; gap: 4px; margin-top: 10px; }
+    .seg {
+      flex: 1; height: 4px; border-radius: 99px;
+      background: var(--border); max-width: 40px;
+      transition: background 0.3s;
+    }
+    .seg-done   { background: var(--success); }
+    .seg-active { background: var(--accent); animation: pulse 1.5s ease-in-out infinite; }
 
-    /* Feynman */
+    /* Action buttons */
+    .tc-actions {
+      display: flex; gap: 8px; flex-wrap: wrap;
+      margin-top: 14px; padding-top: 14px;
+      border-top: 1px solid var(--border);
+    }
+    .tc-btn-start { flex-shrink: 0; }
+    .tc-btn-mini  { flex-shrink: 0; }
+    .tc-btn-skip  { margin-left: auto; }
+    .btn-sm { padding: 5px 12px; font-size: 12px; }
+
+    /* ── FEYNMAN ── */
     .feynman-overlay {
       position: fixed; inset: 0;
-      background: rgba(0,0,0,0.75);
+      background: rgba(0,0,0,0.8);
       display: flex; align-items: center; justify-content: center;
-      z-index: 100;
+      z-index: 300;
     }
-    .feynman-modal   { max-width: 480px; width: 90%; display: flex; flex-direction: column; gap: 14px; }
-    .feynman-text    { color: var(--text-primary); line-height: 1.75; font-size: 14px; }
+    .feynman-modal   { max-width: 480px; width: 90%; }
+    .feynman-label   { font-size: 13px; font-weight: 700; color: var(--accent); margin-bottom: 14px; }
+    .feynman-text    { color: var(--text-primary); line-height: 1.75; font-size: 14px; margin-bottom: 20px; }
+    .feynman-actions { display: flex; gap: 10px; }
 
-    /* Shared */
+    /* ── SHARED ── */
     .empty-state { color: var(--text-muted); font-size: 13px; line-height: 1.6; }
-    .btn-success { background: rgba(74,222,128,0.15); color: var(--success); border: 1px solid rgba(74,222,128,0.3); }
-    .btn-danger  { background: rgba(248,113,113,0.12); color: var(--danger);  border: 1px solid rgba(248,113,113,0.3); }
   `
   document.head.appendChild(s)
 }

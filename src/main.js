@@ -1,7 +1,7 @@
 // src/main.js
 // Entry point: boots engine, handles navigation, manages global state
 
-import { bootEngine, regenerateTasks, updateTaskState } from './engine/behaviorEngine.js'
+import { bootEngine, regenerateTasks, updateTaskState, loadCurrentState } from './engine/behaviorEngine.js'
 import { renderDashboard }             from './ui/dashboard.js'
 import { renderTaskView }              from './ui/taskView.js'
 import { renderSettings }              from './ui/settingsView.js'
@@ -10,7 +10,7 @@ import { renderSettings }              from './ui/settingsView.js'
 let appState = { tasks: [], mode: 'normal', data: null }
 
 // Expose regenerateTasks for taskView
-window.__BE_ENGINE__ = { regenerateTasks, updateTaskState }
+window.__BE_ENGINE__ = { regenerateTasks, updateTaskState, loadCurrentState }
 
 // ── Boot ──────────────────────────────────────────────────────
 function init() {
