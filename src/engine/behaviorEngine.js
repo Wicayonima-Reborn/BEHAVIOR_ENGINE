@@ -1,22 +1,28 @@
 // src/engine/behaviorEngine.js
-// Main orchestrator: daily reset, mode determination, task generation
+// Main orchestrator: daily reset, mode detection, task generation
+// Now integrates session-aware task building
 
 import { loadData, saveData, getTodayStr } from '../data/storage.js'
 import { determineMode, updatePriority }    from './adaptiveSystem.js'
 import { generateTasks }                    from './taskGenerator.js'
+import { buildSessionTask, calcSkipRate }   from './sessionEngine.js'
+
+// ─────────────────────────────────────────
+// BOOT
+// ─────────────────────────────────────────
 
 /**
- * Bootstrap the engine on app start.
- * Handles daily reset, mode detection, task generation.
- * @returns {{ data, tasks, mode }}
+ * Bootstrap engine on app start.
+ * Handles daily reset, mode, session task building.
  */
 export function bootEngine() {
   let data  = loadData()
   const today = getTodayStr()
 
-  // Daily reset: regenerate tasks if date has changed
   if (data.lastReset !== today) {
-    data.tasks     = generateTasks(data.activities, determineMode(data))
+    const mode  = determineMode(data)
+    const raw   = generateTasks(data.activities, mode)
+    data.tasks  = raw.map(t => buildSessionTask(t, mode, data))
     data.lastReset = today
     saveData(data)
   }
@@ -27,22 +33,23 @@ export function bootEngine() {
   return { data, tasks, mode }
 }
 
+// ─────────────────────────────────────────
+// RESOLVE TASK (done / skip)
+// ─────────────────────────────────────────
+
 /**
- * Mark a task as done or skipped.
+ * Mark a task as done or skipped (final resolution).
  * Updates history, priority, persists data.
- * @param {string} taskId
- * @param {'done'|'skip'} status
- * @returns {{ data, tasks, mode }}
  */
 export function resolveTask(taskId, status) {
   let data  = loadData()
   const task = (data.tasks || []).find(t => t.id === taskId)
   if (!task) return { data, tasks: data.tasks, mode: determineMode(data) }
 
-  // Update task status
-  data.tasks = data.tasks.map(t => t.id === taskId ? { ...t, status } : t)
+  data.tasks = data.tasks.map(t =>
+    t.id === taskId ? { ...t, status, state: status === 'done' ? 'done' : 'idle' } : t
+  )
 
-  // Append to history
   data.history.push({
     date:     getTodayStr(),
     taskName: task.name,
@@ -50,32 +57,43 @@ export function resolveTask(taskId, status) {
     duration: task.duration
   })
 
-  // Recalculate priority
   data.activities = updatePriority(data, task.activity, status)
-
   saveData(data)
+
   const mode = determineMode(data)
   return { data, tasks: data.tasks, mode }
 }
 
+// ─────────────────────────────────────────
+// UPDATE TASK STATE (session progress)
+// ─────────────────────────────────────────
+
 /**
- * Save a new activity (from settings).
+ * Persist updated session state for a task.
+ * Called by taskView after each session event.
  */
+export function updateTaskState(taskId, updatedTask) {
+  const data = loadData()
+  data.tasks = (data.tasks || []).map(t =>
+    t.id === taskId ? { ...t, ...updatedTask } : t
+  )
+  saveData(data)
+  return { data, tasks: data.tasks, mode: determineMode(data) }
+}
+
+// ─────────────────────────────────────────
+// ACTIVITY MANAGEMENT
+// ─────────────────────────────────────────
+
 export function saveActivity(activity) {
   const data = loadData()
-  const exists = data.activities.findIndex(a => a.name === activity.name)
-  if (exists >= 0) {
-    data.activities[exists] = activity
-  } else {
-    data.activities.push(activity)
-  }
+  const idx  = data.activities.findIndex(a => a.name === activity.name)
+  if (idx >= 0) data.activities[idx] = activity
+  else data.activities.push(activity)
   saveData(data)
   return data
 }
 
-/**
- * Delete an activity by name.
- */
 export function deleteActivity(name) {
   const data = loadData()
   data.activities = data.activities.filter(a => a.name !== name)
@@ -83,13 +101,15 @@ export function deleteActivity(name) {
   return data
 }
 
-/**
- * Force-regenerate today's tasks (manual refresh).
- */
+// ─────────────────────────────────────────
+// REGENERATE
+// ─────────────────────────────────────────
+
 export function regenerateTasks() {
-  const data  = loadData()
-  const mode  = determineMode(data)
-  data.tasks  = generateTasks(data.activities, mode)
+  const data = loadData()
+  const mode = determineMode(data)
+  const raw  = generateTasks(data.activities, mode)
+  data.tasks = raw.map(t => buildSessionTask(t, mode, data))
   saveData(data)
   return { data, tasks: data.tasks, mode }
 }
