@@ -1,89 +1,79 @@
-// src/main.js
-// Entry point: boots engine, handles navigation, manages global state
-
+// ESM — entry point
 import { bootEngine, regenerateTasks, updateTaskState, loadCurrentState } from './engine/behaviorEngine.js'
-import { renderDashboard }             from './ui/dashboard.js'
-import { renderTaskView }              from './ui/taskView.js'
-import { renderSettings }              from './ui/settingsView.js'
+import { applyDailyDecay }   from './engine/momentumEngine.js'
+import { saveData }          from './data/storage.js'
+import { renderDashboard }   from './ui/dashboard.js'
+import { renderTaskView }    from './ui/taskView/index.js'
+import { renderSettings }    from './ui/settingsView.js'
 
-// ── Global State ──────────────────────────────────────────────
+// ── Global state ────────────────────────────────────
 let appState = { tasks: [], mode: 'normal', data: null }
 
-// Expose regenerateTasks for taskView
+// ── Expose to window for engine + UI modules ────────
 window.__BE_ENGINE__ = { regenerateTasks, updateTaskState, loadCurrentState }
+window.__BE_UI__     = {}   // populated by renderTaskView
 
-// ── Boot ──────────────────────────────────────────────────────
+// ── Boot ────────────────────────────────────────────
 function init() {
-  const result = bootEngine()
+  let result = bootEngine()
+
+  // Daily momentum decay
+  const decayed = applyDailyDecay(result.data)
+  if (decayed !== result.data) {
+    saveData(decayed)
+    result = { ...result, data: decayed, tasks: decayed.tasks || result.tasks }
+  }
+
   appState = result
-  renderView('dashboard')
-  bindNavigation()
-  bindTitlebarControls()
-  updateModeBadge(appState.mode)
+  navigate('dashboard')
+  bindNav()
+  bindTitlebar()
+  setBadge(appState.mode)
 }
 
-// ── Navigation ─────────────────────────────────────────────────
-function bindNavigation() {
+// ── Navigation ──────────────────────────────────────
+function bindNav() {
   document.querySelectorAll('.nav-item').forEach(item => {
     item.addEventListener('click', () => {
       document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'))
       item.classList.add('active')
-      renderView(item.dataset.view)
+      navigate(item.dataset.view)
     })
   })
 }
 
-function renderView(viewName) {
+function navigate(view) {
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'))
-  const container = document.getElementById(`view-${viewName}`)
-  if (!container) return
-  container.classList.add('active')
-
-  switch (viewName) {
-    case 'dashboard':
-      renderDashboard(container, appState)
-      break
-    case 'tasks':
-      renderTaskView(container, appState, onStateUpdate)
-      break
-    case 'settings':
-      renderSettings(container, onStateUpdate)
-      break
-  }
+  const c = document.getElementById('view-' + view)
+  if (!c) return
+  c.classList.add('active')
+  if (view === 'dashboard') renderDashboard(c, appState)
+  if (view === 'tasks')     renderTaskView(c, appState, onUpdate)
+  if (view === 'settings')  renderSettings(c, onUpdate)
 }
 
-// ── State Update Callback ──────────────────────────────────────
-// Called by any UI component that changes state
-function onStateUpdate(newState) {
+// ── State update ────────────────────────────────────
+function onUpdate(newState) {
   if (!newState) return
   appState = { ...appState, ...newState }
-  updateModeBadge(appState.mode)
-
-  // Re-render active view
-  const activeView = document.querySelector('.nav-item.active')?.dataset?.view
-  if (activeView) renderView(activeView)
+  setBadge(appState.mode)
+  const active = document.querySelector('.nav-item.active')?.dataset?.view
+  if (active) navigate(active)
 }
 
-// ── Mode Badge ────────────────────────────────────────────────
-function updateModeBadge(mode) {
-  const badge = document.getElementById('mode-badge')
-  if (!badge) return
-  badge.className = `mode-badge mode-${mode}`
-  badge.textContent = `${mode.toUpperCase()}`
+// ── Mode badge ──────────────────────────────────────
+function setBadge(mode) {
+  const el = document.getElementById('mode-badge')
+  if (!el) return
+  el.className  = 'mode-badge mode-' + mode
+  el.textContent = mode.toUpperCase()
 }
 
-// ── Titlebar Controls ─────────────────────────────────────────
-function bindTitlebarControls() {
-  document.getElementById('btn-minimize')?.addEventListener('click', () => {
-    window.electronAPI?.minimize()
-  })
-  document.getElementById('btn-maximize')?.addEventListener('click', () => {
-    window.electronAPI?.maximize()
-  })
-  document.getElementById('btn-close')?.addEventListener('click', () => {
-    window.electronAPI?.close()
-  })
+// ── Titlebar ────────────────────────────────────────
+function bindTitlebar() {
+  document.getElementById('btn-minimize')?.addEventListener('click', () => window.electronAPI?.minimize())
+  document.getElementById('btn-maximize')?.addEventListener('click', () => window.electronAPI?.maximize())
+  document.getElementById('btn-close')?.addEventListener('click',    () => window.electronAPI?.close())
 }
 
-// ── Start ─────────────────────────────────────────────────────
 init()

@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8"/>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 100%; height: 100%; background: transparent; overflow: hidden;
+  font-family: 'Segoe UI', system-ui, sans-serif; user-select: none; }
+
+#card {
+  position: fixed; inset: 0;
+  background: rgba(14,14,19,0.92);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 14px;
+  padding: 12px 14px;
+  display: flex; flex-direction: column;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  transition: border-color 0.3s;
+}
+#card.s-run   { border-color: rgba(124,106,247,0.5); }
+#card.s-break { border-color: rgba(251,191,36,0.45); }
+
+.drag { width: 36px; height: 4px; background: rgba(255,255,255,0.1);
+  border-radius: 99px; margin: 0 auto 10px; -webkit-app-region: drag; cursor: grab; }
+
+#close { position: absolute; top: 8px; right: 8px; background: transparent; border: none;
+  color: rgba(255,255,255,0.3); font-size: 13px; cursor: pointer; line-height: 1; padding: 2px 4px;
+  border-radius: 4px; -webkit-app-region: no-drag; }
+#close:hover { color: #f87171; }
+
+#task-name { font-size: 10px; font-weight: 700; color: rgba(255,255,255,0.4);
+  text-transform: uppercase; letter-spacing: 0.08em; text-align: center; margin-bottom: 3px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#state-lbl { font-size: 10px; font-weight: 700; text-align: center; margin-bottom: 8px; letter-spacing: 0.06em; }
+.lbl-run   { color: #9d8fff; }
+.lbl-break { color: #fbbf24; }
+.lbl-idle  { color: rgba(255,255,255,0.3); }
+
+#timer { font-size: 42px; font-weight: 800; text-align: center; letter-spacing: 0.03em;
+  font-variant-numeric: tabular-nums; line-height: 1; margin-bottom: 8px; }
+.t-run   { color: #9d8fff; }
+.t-break { color: #fbbf24; }
+.t-idle  { color: rgba(255,255,255,0.25); }
+
+#seg-bar { display: flex; gap: 4px; margin-bottom: 8px; justify-content: center; }
+.seg      { flex: 1; max-width: 28px; height: 3px; border-radius: 99px; background: rgba(255,255,255,0.1); }
+.seg-done { background: #4ade80; }
+.seg-cur  { background: #9d8fff; animation: segpulse 1.5s ease-in-out infinite; }
+@keyframes segpulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+#sess-lbl { font-size: 10px; color: rgba(255,255,255,0.3); text-align: center; margin-bottom: 10px; }
+
+#quote { font-size: 10px; color: rgba(255,255,255,0.35); font-style: italic; text-align: center;
+  border-top: 1px solid rgba(255,255,255,0.06); padding-top: 8px; margin-bottom: 10px; line-height: 1.5; }
+
+#btns { display: flex; gap: 6px; justify-content: center; -webkit-app-region: no-drag; }
+.ob { font-size: 11px; font-weight: 600; padding: 5px 10px; border-radius: 7px;
+  border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.06);
+  color: #e8e8f0; cursor: pointer; transition: background 0.15s; }
+.ob:active { transform: scale(0.95); }
+.ob-p { background: rgba(157,143,255,0.2); border-color: rgba(157,143,255,0.4); color: #c4bcff; }
+.ob-p:hover { background: rgba(157,143,255,0.35); }
+.ob-y { background: rgba(251,191,36,0.15); border-color: rgba(251,191,36,0.35); color: #fbbf24; }
+.ob-y:hover { background: rgba(251,191,36,0.28); }
+.ob-r { background: rgba(248,113,113,0.12); border-color: rgba(248,113,113,0.3); color: #f87171; }
+.ob-r:hover { background: rgba(248,113,113,0.25); }
+
+#idle-msg { text-align: center; font-size: 12px; color: rgba(255,255,255,0.3); padding: 16px 0; }
+</style>
+</head>
+<body>
+<div id="card">
+  <div class="drag"></div>
+  <button id="close">✕</button>
+
+  <div id="active-ui" style="display:none">
+    <div id="task-name">—</div>
+    <div id="state-lbl" class="lbl-idle">—</div>
+    <div id="timer" class="t-idle">00:00</div>
+    <div id="seg-bar"></div>
+    <div id="sess-lbl">—</div>
+    <div id="quote"></div>
+    <div id="btns"></div>
+  </div>
+
+  <div id="idle-ui">
+    <div id="idle-msg">Belum ada sesi aktif</div>
+  </div>
+</div>
+
+<script>
+var ipcRenderer = require('electron').ipcRenderer
+
+var QUOTES = [
+  'Fokus sesi ini aja.',
+  'Cuma beberapa menit lagi.',
+  'Konsisten itu kuncinya.',
+  'Lu bisa. Satu sesi satu waktu.',
+  'Istirahat bentar, jangan kabur.'
+]
+
+function fmt(secs) {
+  var s = Math.max(0, Math.round(secs || 0))
+  return ('0' + Math.floor(s / 60)).slice(-2) + ':' + ('0' + (s % 60)).slice(-2)
+}
+
+function render(data) {
+  var card      = document.getElementById('card')
+  var activeUI  = document.getElementById('active-ui')
+  var idleUI    = document.getElementById('idle-ui')
+  var isActive  = data && (data.state === 'running' || data.state === 'break')
+
+  if (!isActive) {
+    card.className = ''
+    activeUI.style.display = 'none'
+    idleUI.style.display   = 'block'
+    return
+  }
+
+  activeUI.style.display = 'block'
+  idleUI.style.display   = 'none'
+
+  var isBreak = data.state === 'break'
+  card.className = isBreak ? 's-break' : 's-run'
+
+  document.getElementById('task-name').textContent = data.taskName || '—'
+
+  var sl = document.getElementById('state-lbl')
+  sl.textContent = isBreak ? '☕ BREAK' : '● FOCUS'
+  sl.className   = isBreak ? 'lbl-break' : 'lbl-run'
+
+  var tl = document.getElementById('timer')
+  tl.textContent = fmt(data.remainingSeconds)
+  tl.className   = isBreak ? 't-break' : 't-run'
+
+  var bar  = document.getElementById('seg-bar')
+  var segs = data.sessions || []
+  bar.innerHTML = segs.map(function (_, i) {
+    var cls = i < data.completedSessions ? 'seg seg-done'
+            : i === data.currentSession && !isBreak ? 'seg seg-cur' : 'seg'
+    return '<div class="' + cls + '"></div>'
+  }).join('')
+
+  document.getElementById('sess-lbl').textContent =
+    'Sesi ' + ((data.currentSession || 0) + 1) + ' / ' + (segs.length || 1)
+
+  document.getElementById('quote').textContent =
+    QUOTES[Math.floor(Math.random() * QUOTES.length)]
+
+  var btns = document.getElementById('btns')
+  if (isBreak) {
+    btns.innerHTML =
+      '<button class="ob ob-y" id="b-skip">Lewati Break →</button>' +
+      '<button class="ob ob-r" id="b-stop">✕ Stop</button>'
+    document.getElementById('b-skip').onclick = function () { send('skip-break') }
+  } else {
+    btns.innerHTML =
+      '<button class="ob ob-p" id="b-done">✓ Selesai</button>' +
+      '<button class="ob ob-r" id="b-stop">✕ Stop</button>'
+    document.getElementById('b-done').onclick = function () { send('done-early') }
+  }
+  document.getElementById('b-stop').onclick = function () { send('stop') }
+}
+
+function send(action) {
+  ipcRenderer.send('overlay-action', { action: action })
+}
+
+ipcRenderer.on('session-update', function (_, data) { render(data) })
+
+document.getElementById('close').onclick = function () { send('hide-overlay') }
+</script>
+</body>
+</html>

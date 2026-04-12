@@ -2,43 +2,32 @@
 // Determines mode: 'normal' | 'lazy' | 'focus'
 // and adjusts activity priorities based on history
 
-import { getRecentHistory } from '../data/storage.js'
+// ESM
+import { today, yesterday } from '../data/storage.js'
 
-/**
- * Determine current mode based on recent task history.
- * @param {object} data - full app data
- * @returns {'normal'|'lazy'|'focus'}
- */
 export function determineMode(data) {
-  const { settings } = data
-  const recent = getRecentHistory(data, 3) // last 3 days
-
+  const recent = recentHistory(data, 3)
   if (recent.length === 0) return 'normal'
-
   const skipped = recent.filter(h => h.status === 'skip').length
   const done    = recent.filter(h => h.status === 'done').length
-
-  if (skipped >= settings.skipThreshold)  return 'lazy'
-  if (done   >= settings.focusThreshold)  return 'focus'
+  const { skipThreshold = 3, focusThreshold = 5 } = data.settings || {}
+  if (skipped >= skipThreshold)  return 'lazy'
+  if (done    >= focusThreshold) return 'focus'
   return 'normal'
 }
 
-/**
- * Update activity priority based on recent performance.
- * Called after each task completion or skip.
- * @param {object} data
- * @param {string} activityName
- * @param {'done'|'skip'} status
- * @returns updated activities array
- */
 export function updatePriority(data, activityName, status) {
-  return data.activities.map(act => {
-    if (act.name !== activityName) return act
-    let priority = act.priority
-
-    if (status === 'done') priority = Math.min(5, priority + 0.5)
-    if (status === 'skip') priority = Math.max(1, priority - 0.5)
-
-    return { ...act, priority: Math.round(priority * 10) / 10 }
+  return data.activities.map(a => {
+    if (a.name !== activityName) return a
+    let p = a.priority
+    if (status === 'done') p = Math.min(5, p + 0.5)
+    if (status === 'skip') p = Math.max(1, p - 0.5)
+    return { ...a, priority: Math.round(p * 10) / 10 }
   })
+}
+
+function recentHistory(data, days) {
+  const cutoff = new Date()
+  cutoff.setDate(cutoff.getDate() - days)
+  return (data.history || []).filter(h => new Date(h.date) >= cutoff)
 }
